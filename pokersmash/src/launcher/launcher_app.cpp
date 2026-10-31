@@ -3,12 +3,18 @@
 #include "launcher_app.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 
 #include <imgui.h>
+#include <imgui_internal.h>
+
+#include "launcher_theme.h"
+#include "roboto_medium_embedded.h"
 
 #include <rex/filesystem.h>
 #include <rex/logging.h>
@@ -33,16 +39,9 @@ namespace pokersmash_launcher {
 
 namespace {
 
-// --- Palette (dark, emulator-launcher look) ---
-constexpr ImVec4 kBg{0.09f, 0.09f, 0.10f, 1.00f};
-constexpr ImVec4 kSidebarBg{0.06f, 0.06f, 0.07f, 1.00f};
-constexpr ImVec4 kPanelBg{0.12f, 0.12f, 0.14f, 1.00f};
-constexpr ImVec4 kAccent{0.85f, 0.20f, 0.20f, 1.00f};
-constexpr ImVec4 kAccentHover{0.95f, 0.30f, 0.30f, 1.00f};
-constexpr ImVec4 kTextDim{0.60f, 0.60f, 0.62f, 1.00f};
-
-// Width of the left navigation column.
-constexpr float kSidebarWidth = 200.0f;
+using launcher::Icon;
+namespace metrics = launcher::metrics;
+namespace palette = launcher::palette;
 
 // The game executable the launcher starts.
 constexpr const char* kGameExeName = "pokersmash.exe";
@@ -90,12 +89,15 @@ constexpr Option kLanguageOptions[] = {
     {"Italian", "Italian"},
 };
 
-// Draws a labelled combo bound to a string setting. Returns true if changed.
+// ---------------------------------------------------------------------------
+// Combo
+//
+// ImGui's own combo is styled through the global style, so this only has to
+// place it and keep the label/value mapping.
+// ---------------------------------------------------------------------------
 bool ComboSetting(const char* id, const char* label, const Option* options, size_t count,
-                  std::string& value, float width = 220.0f) {
-  ImGui::PushID(id);
-  ImGui::TextUnformatted(label);
-  ImGui::SetNextItemWidth(width);
+                  std::string& value, float width) {
+  const launcher::Fonts& f = launcher::GetFonts();
 
   const char* current = options[0].label;
   for (size_t i = 0; i < count; ++i) {
@@ -105,6 +107,9 @@ bool ComboSetting(const char* id, const char* label, const Option* options, size
     }
   }
 
+  ImGui::PushID(id);
+  ImGui::PushFont(f.body, f.body->LegacySize);
+  ImGui::SetNextItemWidth(width);
   bool changed = false;
   if (ImGui::BeginCombo("##combo", current)) {
     for (size_t i = 0; i < count; ++i) {
@@ -119,15 +124,45 @@ bool ComboSetting(const char* id, const char* label, const Option* options, size
     }
     ImGui::EndCombo();
   }
+  ImGui::PopFont();
   ImGui::PopID();
   return changed;
 }
 
-// A dimmed explanatory line under a control.
-void Hint(const char* text) {
-  ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
-  ImGui::TextWrapped("%s", text);
-  ImGui::PopStyleColor();
+// ---------------------------------------------------------------------------
+// Page header
+//
+// Icon in a tinted square, then the page title and a one-line description.
+// ---------------------------------------------------------------------------
+void PageHeader(const char* title, const char* description, Icon icon) {
+  const launcher::Fonts& f = launcher::GetFonts();
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  const float badge = 52.0f;
+
+  // Icon badge.
+  dl->AddRectFilled(origin, ImVec2(origin.x + badge, origin.y + badge),
+                    ImGui::GetColorU32(palette::kAccentWash), metrics::kRadius);
+  dl->AddRect(origin, ImVec2(origin.x + badge, origin.y + badge),
+              ImGui::GetColorU32(ImVec4(palette::kAccent.x, palette::kAccent.y,
+                                        palette::kAccent.z, 0.35f)),
+              metrics::kRadius, 0, 1.0f);
+  launcher::DrawIcon(icon, ImVec2(origin.x + badge * 0.5f, origin.y + badge * 0.5f), 24.0f,
+                     ImGui::GetColorU32(palette::kAccentHot), 1.8f);
+
+  // Title + description, to the right of the badge.
+  const float text_x = origin.x + badge + 20.0f;
+  const ImVec2 title_size = f.title->CalcTextSizeA(f.title->LegacySize, FLT_MAX, 0.0f, title);
+  const float text_y = origin.y + (badge - title_size.y - 20.0f) * 0.5f;
+
+  dl->AddText(f.title, f.title->LegacySize, ImVec2(text_x, text_y),
+              ImGui::GetColorU32(palette::kText), title);
+  dl->AddText(f.caption, f.caption->LegacySize, ImVec2(text_x, text_y + title_size.y + 6.0f),
+              ImGui::GetColorU32(palette::kTextMuted), description);
+
+  ImGui::Dummy(ImVec2(0, badge));
+  ImGui::Dummy(ImVec2(0, 26.0f));
 }
 
 std::string Trim(std::string s) {
@@ -262,31 +297,111 @@ bool LauncherApp::SetupUi() {
   window_->SetPresenter(presenter_.get());
 
   imgui_drawer_ = std::make_unique<rex::ui::ImGuiDrawer>(
-      window_.get(), 64, nullptr,
-      [](ImGuiStyle& imgui_style, rex::ui::Style&) {
-        // Dark theme with square-ish corners, matching the reference launcher.
-        imgui_style.WindowRounding = 0.0f;
-        imgui_style.FrameRounding = 2.0f;
-        imgui_style.GrabRounding = 2.0f;
-        imgui_style.ScrollbarRounding = 2.0f;
-        imgui_style.TabRounding = 2.0f;
-        imgui_style.WindowBorderSize = 0.0f;
-        imgui_style.FrameBorderSize = 0.0f;
-        imgui_style.WindowPadding = ImVec2(16, 16);
-        imgui_style.FramePadding = ImVec2(10, 6);
-        imgui_style.ItemSpacing = ImVec2(8, 10);
-        imgui_style.Colors[ImGuiCol_WindowBg] = kBg;
-        imgui_style.Colors[ImGuiCol_ChildBg] = kPanelBg;
-        imgui_style.Colors[ImGuiCol_Border] = ImVec4(0.20f, 0.20f, 0.22f, 1.0f);
-        imgui_style.Colors[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
-        imgui_style.Colors[ImGuiCol_FrameBg] = ImVec4(0.18f, 0.18f, 0.20f, 1.0f);
-        imgui_style.Colors[ImGuiCol_FrameBgHovered] = ImVec4(0.24f, 0.24f, 0.27f, 1.0f);
-        imgui_style.Colors[ImGuiCol_Button] = kAccent;
-        imgui_style.Colors[ImGuiCol_ButtonHovered] = kAccentHover;
-        imgui_style.Colors[ImGuiCol_ButtonActive] = kAccent;
-        imgui_style.Colors[ImGuiCol_Header] = ImVec4(0.22f, 0.22f, 0.25f, 1.0f);
-        imgui_style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.28f, 0.28f, 0.32f, 1.0f);
-        imgui_style.Colors[ImGuiCol_Text] = ImVec4(0.92f, 0.92f, 0.93f, 1.0f);
+      window_.get(), 64,
+      [](ImFontAtlas* atlas) {
+        // The SDK seeds the atlas with ProggyTiny plus a merged Japanese font.
+        // Neither is wanted here: ProggyTiny is a 10px bitmap-ish face that
+        // makes the whole UI look like a debug tool, and the launcher shows no
+        // Japanese text. Start from an empty atlas and load the embedded Roboto
+        // Medium at every size the type scale needs.
+        atlas->Clear();
+
+        launcher::Fonts& fonts = launcher::GetFonts();
+
+        // The font bytes live in a static array, so the atlas must not try to
+        // free them when it is torn down.
+        ImFontConfig cfg;
+        cfg.FontDataOwnedByAtlas = false;
+        cfg.OversampleH = 2;
+        cfg.OversampleV = 1;
+        cfg.PixelSnapH = true;
+
+        static const ImWchar ranges[] = {
+            0x0020, 0x00FF,  // Basic Latin + Latin Supplement
+            0x2013, 0x2014,  // en dash, em dash
+            0x2022, 0x2022,  // bullet
+            0x2192, 0x2192,  // rightwards arrow
+            0,
+        };
+
+        // Index 0 is the default, so any ImGui::Text that forgets to push a
+        // font still renders at body size instead of falling back to something
+        // unreadable.
+        fonts.micro = atlas->AddFontFromMemoryTTF(
+            const_cast<void*>(static_cast<const void*>(::kRobotoMedium)),
+            static_cast<int>(::kRobotoMediumSize), 12.0f, &cfg, ranges);
+        fonts.caption = atlas->AddFontFromMemoryTTF(
+            const_cast<void*>(static_cast<const void*>(::kRobotoMedium)),
+            static_cast<int>(::kRobotoMediumSize), 13.0f, &cfg, ranges);
+        fonts.body = atlas->AddFontFromMemoryTTF(
+            const_cast<void*>(static_cast<const void*>(::kRobotoMedium)),
+            static_cast<int>(::kRobotoMediumSize), 15.0f, &cfg, ranges);
+        fonts.emphasis = atlas->AddFontFromMemoryTTF(
+            const_cast<void*>(static_cast<const void*>(::kRobotoMedium)),
+            static_cast<int>(::kRobotoMediumSize), 17.0f, &cfg, ranges);
+        fonts.title = atlas->AddFontFromMemoryTTF(
+            const_cast<void*>(static_cast<const void*>(::kRobotoMedium)),
+            static_cast<int>(::kRobotoMediumSize), 26.0f, &cfg, ranges);
+        fonts.display = atlas->AddFontFromMemoryTTF(
+            const_cast<void*>(static_cast<const void*>(::kRobotoMedium)),
+            static_cast<int>(::kRobotoMediumSize), 40.0f, &cfg, ranges);
+      },
+      [](ImGuiStyle& s, rex::ui::Style&) {
+        // --- Geometry: soft, consistent rounding ---
+        s.WindowRounding = 0.0f;
+        s.ChildRounding = metrics::kRadius;
+        s.FrameRounding = metrics::kRadiusSmall;
+        s.GrabRounding = metrics::kRadiusSmall;
+        s.PopupRounding = metrics::kRadiusSmall;
+        s.ScrollbarRounding = metrics::kRadiusSmall;
+        s.TabRounding = metrics::kRadiusSmall;
+
+        s.WindowBorderSize = 0.0f;
+        s.ChildBorderSize = 1.0f;
+        s.FrameBorderSize = 0.0f;
+        s.PopupBorderSize = 1.0f;
+
+        s.WindowPadding = ImVec2(0, 0);
+        s.FramePadding = ImVec2(12, 9);
+        s.ItemSpacing = ImVec2(8, 8);
+        s.ItemInnerSpacing = ImVec2(8, 6);
+        s.ScrollbarSize = 10.0f;
+        s.GrabMinSize = 12.0f;
+
+        // --- Surfaces ---
+        s.Colors[ImGuiCol_WindowBg] = palette::kBg;
+        s.Colors[ImGuiCol_ChildBg] = palette::kCard;
+        s.Colors[ImGuiCol_PopupBg] = ImVec4(0.106f, 0.114f, 0.129f, 0.98f);
+        s.Colors[ImGuiCol_Border] = palette::kBorder;
+        s.Colors[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
+        s.Colors[ImGuiCol_Separator] = palette::kBorder;
+
+        // --- Text ---
+        s.Colors[ImGuiCol_Text] = palette::kText;
+        s.Colors[ImGuiCol_TextDisabled] = palette::kTextFaint;
+        s.Colors[ImGuiCol_TextSelectedBg] = palette::kAccentWash;
+
+        // --- Inputs ---
+        s.Colors[ImGuiCol_FrameBg] = palette::kField;
+        s.Colors[ImGuiCol_FrameBgHovered] = palette::kFieldHover;
+        s.Colors[ImGuiCol_FrameBgActive] = palette::kFieldHover;
+
+        // --- Interactive ---
+        s.Colors[ImGuiCol_CheckMark] = palette::kAccentHot;
+        s.Colors[ImGuiCol_SliderGrab] = palette::kAccent;
+        s.Colors[ImGuiCol_SliderGrabActive] = palette::kAccentHot;
+        s.Colors[ImGuiCol_Button] = palette::kField;
+        s.Colors[ImGuiCol_ButtonHovered] = palette::kFieldHover;
+        s.Colors[ImGuiCol_ButtonActive] = palette::kFieldHover;
+        s.Colors[ImGuiCol_Header] = palette::kField;
+        s.Colors[ImGuiCol_HeaderHovered] = palette::kFieldHover;
+        s.Colors[ImGuiCol_HeaderActive] = palette::kFieldHover;
+
+        // --- Scrollbar ---
+        s.Colors[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
+        s.Colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.22f, 0.24f, 0.27f, 1.0f);
+        s.Colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.30f, 0.32f, 0.36f, 1.0f);
+        s.Colors[ImGuiCol_ScrollbarGrabActive] = palette::kAccent;
       });
   imgui_drawer_->SetPresenterAndImmediateDrawer(presenter_.get(), immediate_drawer_.get());
 
@@ -324,25 +439,40 @@ void LauncherApp::DrawFrame() {
   // keeps the bottom bar on screen regardless of how tall the page content is.
   const float total_w = ImGui::GetWindowWidth();
   const float total_h = ImGui::GetWindowHeight();
-  constexpr float kBottomHeight = 68.0f;
-  const float content_h = total_h - kBottomHeight;
+  const float bottom_h = metrics::kBottomBarHeight;
+  const float content_h = total_h - bottom_h;
 
-  // --- Sidebar (fixed column, full height of the content area) ---
+  ImDrawList* bg = ImGui::GetWindowDrawList();
+
+  // --- Sidebar backdrop: a vertical gradient, lighter at the top ---
+  bg->AddRectFilledMultiColor(
+      ImVec2(0, 0), ImVec2(metrics::kSidebarWidth, content_h),
+      ImGui::GetColorU32(palette::kSidebarTop), ImGui::GetColorU32(palette::kSidebarTop),
+      ImGui::GetColorU32(palette::kSidebarBottom), ImGui::GetColorU32(palette::kSidebarBottom));
+
+  // A hairline where the sidebar meets the content, so the two surfaces read as
+  // separate planes rather than one flat colour.
+  bg->AddLine(ImVec2(metrics::kSidebarWidth, 0), ImVec2(metrics::kSidebarWidth, content_h),
+              ImGui::GetColorU32(palette::kBorder), 1.0f);
+
+  // --- Sidebar content ---
   ImGui::SetCursorPos(ImVec2(0, 0));
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, kSidebarBg);
-  ImGui::BeginChild("##sidebar", ImVec2(kSidebarWidth, content_h), false,
-                    ImGuiWindowFlags_NoScrollbar);
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+  ImGui::BeginChild("##sidebar", ImVec2(metrics::kSidebarWidth, content_h), false,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
   DrawSidebarContents();
   ImGui::EndChild();
   ImGui::PopStyleColor();
 
-  // --- Content (right of the sidebar) ---
-  const float content_w = total_w - kSidebarWidth;
-  ImGui::SetCursorPos(ImVec2(kSidebarWidth, 0));
+  // --- Content ---
+  const float content_w = total_w - metrics::kSidebarWidth;
+  ImGui::SetCursorPos(ImVec2(metrics::kSidebarWidth, 0));
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
   ImGui::BeginChild("##content", ImVec2(content_w, content_h), false,
-                    ImGuiWindowFlags_NoScrollbar);
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
 
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24, 20));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                      ImVec2(metrics::kPagePadding, metrics::kPagePadding));
   ImGui::BeginChild("##page", ImVec2(0, 0), false);
 
   switch (settings_.page) {
@@ -366,325 +496,454 @@ void LauncherApp::DrawFrame() {
   ImGui::EndChild();
   ImGui::PopStyleVar();
   ImGui::EndChild();
+  ImGui::PopStyleColor();
 
-  // --- Bottom bar (Save / PLAY) ---
-  ImGui::SetCursorPos(ImVec2(0, content_h));
-  ImGui::BeginChild("##bottom", ImVec2(total_w, kBottomHeight), false,
-                    ImGuiWindowFlags_NoScrollbar);
+  // --- Bottom bar ---
+  // A soft shadow falling onto the content above the bar, then the bar itself.
+  const float shadow_h = 18.0f;
+  bg->AddRectFilledMultiColor(
+      ImVec2(metrics::kSidebarWidth, content_h - shadow_h),
+      ImVec2(total_w, content_h), ImGui::GetColorU32(ImVec4(0, 0, 0, 0.0f)),
+      ImGui::GetColorU32(ImVec4(0, 0, 0, 0.0f)), ImGui::GetColorU32(ImVec4(0, 0, 0, 0.45f)),
+      ImGui::GetColorU32(ImVec4(0, 0, 0, 0.45f)));
+  bg->AddRectFilled(ImVec2(metrics::kSidebarWidth, content_h), ImVec2(total_w, total_h),
+                    ImGui::GetColorU32(palette::kCard), 0.0f);
+  bg->AddLine(ImVec2(metrics::kSidebarWidth, content_h), ImVec2(total_w, content_h),
+              ImGui::GetColorU32(palette::kBorder), 1.0f);
+
+  ImGui::SetCursorPos(ImVec2(metrics::kSidebarWidth, content_h));
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+  ImGui::BeginChild("##bottom", ImVec2(content_w, bottom_h), false,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
   DrawBottomBarContents();
   ImGui::EndChild();
+  ImGui::PopStyleColor();
 
   ImGui::End();
 }
 
 void LauncherApp::DrawSidebarContents() {
-  ImGui::Dummy(ImVec2(0, 18));
-  ImGui::SetCursorPosX(20);
-  ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-  ImGui::TextUnformatted("POKER SMASH");
-  ImGui::PopStyleColor();
-  ImGui::SetCursorPosX(20);
-  ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
-  ImGui::TextUnformatted("Xbox 360 recompilation");
-  ImGui::PopStyleColor();
-  ImGui::Dummy(ImVec2(0, 22));
+  const launcher::Fonts& f = launcher::GetFonts();
+  ImDrawList* dl = ImGui::GetWindowDrawList();
 
+  // --- Brand block ---
+  ImGui::Dummy(ImVec2(0, 26.0f));
+
+  const ImVec2 brand_origin = ImGui::GetCursorScreenPos();
+  const float brand_x = brand_origin.x + 26.0f;
+
+  // A small accent mark above the wordmark.
+  dl->AddRectFilled(ImVec2(brand_x, brand_origin.y), ImVec2(brand_x + 26.0f, brand_origin.y + 3.0f),
+                    ImGui::GetColorU32(palette::kAccent), 2.0f);
+
+  const ImVec2 brand_size = f.display->CalcTextSizeA(f.display->LegacySize, FLT_MAX, 0.0f,
+                                                     "POKER SMASH");
+  dl->AddText(f.display, f.display->LegacySize, ImVec2(brand_x, brand_origin.y + 14.0f),
+              ImGui::GetColorU32(palette::kText), "POKER SMASH");
+  dl->AddText(f.caption, f.caption->LegacySize, ImVec2(brand_x, brand_origin.y + 14.0f + brand_size.y + 2.0f),
+              ImGui::GetColorU32(palette::kTextFaint), "Xbox 360 recompilation");
+
+  const float brand_block_h = 14.0f + brand_size.y + 2.0f + f.caption->LegacySize;
+  ImGui::Dummy(ImVec2(0, brand_block_h));
+
+  ImGui::Dummy(ImVec2(0, 30.0f));
+  launcher::Overline("MENU");
+  ImGui::Dummy(ImVec2(0, 12.0f));
+
+  // --- Navigation ---
   struct NavEntry {
     const char* label;
     Page page;
+    Icon icon;
   };
   const NavEntry entries[] = {
-      {"HOME", Page::kHome},
-      {"GRAPHICS", Page::kGraphics},
-      {"PERFORMANCE", Page::kPerformance},
-      {"GAME", Page::kGame},
-      {"ADVANCED", Page::kAdvanced},
+      {"Home", Page::kHome, Icon::kHome},
+      {"Graphics", Page::kGraphics, Icon::kGraphics},
+      {"Performance", Page::kPerformance, Icon::kPerformance},
+      {"Game", Page::kGame, Icon::kGame},
+      {"Advanced", Page::kAdvanced, Icon::kAdvanced},
   };
 
-  const float row_h = 36.0f;
+  const float row_w = metrics::kSidebarWidth - 20.0f;
+  ImGui::SetCursorPosX(10.0f);
   for (const auto& entry : entries) {
     const bool active = settings_.page == entry.page;
-    const ImVec2 row_pos = ImGui::GetCursorScreenPos();
-
-    if (active) {
-      // Accent bar down the left edge, like the reference launcher.
-      ImGui::GetWindowDrawList()->AddRectFilled(
-          row_pos, ImVec2(row_pos.x + 3.0f, row_pos.y + row_h), ImGui::GetColorU32(kAccent));
-    }
-
-    ImGui::PushStyleColor(ImGuiCol_Header, active ? ImVec4(0.16f, 0.16f, 0.18f, 1.0f)
-                                                  : ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1, 1, 1, 0.06f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.20f, 0.20f, 0.23f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Text, active ? kAccent : ImVec4(0.85f, 0.85f, 0.87f, 1.0f));
-
-    ImGui::SetCursorPosX(0);
-    if (ImGui::Selectable(entry.label, false, 0, ImVec2(kSidebarWidth, row_h))) {
+    if (launcher::NavItem(entry.label, entry.icon, active, row_w)) {
       settings_.page = entry.page;
     }
-    ImGui::PopStyleColor(4);
+    ImGui::Dummy(ImVec2(0, 2.0f));
   }
+
+  // --- Footer: build identity, pinned to the bottom of the sidebar ---
+  // The sidebar child is exactly the content height, so measure against it.
+  const float footer_h = 46.0f;
+  ImGui::SetCursorPosY(ImGui::GetWindowHeight() - footer_h - 12.0f);
+  dl->AddLine(ImVec2(brand_x, ImGui::GetCursorScreenPos().y),
+              ImVec2(metrics::kSidebarWidth - 20.0f, ImGui::GetCursorScreenPos().y),
+              ImGui::GetColorU32(palette::kBorder), 1.0f);
+  ImGui::Dummy(ImVec2(0, 12.0f));
+  ImGui::SetCursorPosX(26.0f);
+  dl->AddText(f.caption, f.caption->LegacySize, ImGui::GetCursorScreenPos(),
+              ImGui::GetColorU32(palette::kTextFaint), "ReXGlue 0.10.0");
+  ImGui::Dummy(ImVec2(0, f.caption->LegacySize));
 }
 
 void LauncherApp::DrawHomePage() {
-  ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-  ImGui::TextUnformatted("HOME");
-  ImGui::PopStyleColor();
-  Hint("Start the game and check that everything is in place.");
-  ImGui::Dummy(ImVec2(0, 12));
+  const launcher::Fonts& f = launcher::GetFonts();
 
-  // --- Status summary ---
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, kPanelBg);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 14));
-  ImGui::BeginChild("##status", ImVec2(0, 250), true, ImGuiWindowFlags_NoScrollbar);
-  ImGui::TextUnformatted("Status");
-  ImGui::Separator();
-  ImGui::Dummy(ImVec2(0, 8));
+  PageHeader("Home", "Check that everything is in place, then start the game.",
+             Icon::kHome);
 
   const bool have_game = !detected_game_exe_.empty();
-  const bool have_data = !settings_.game_data_root.empty() &&
-                         LooksLikeGameRoot(settings_.game_data_root);
+  const bool have_data =
+      !settings_.game_data_root.empty() && LooksLikeGameRoot(settings_.game_data_root);
+  const bool have_gpu = detected_dll_status_.find("found") != std::string::npos;
 
-  auto status_line = [](const char* label, bool ok, const std::string& detail) {
-    ImGui::TextUnformatted(label);
-    ImGui::SameLine(200);
-    ImGui::PushStyleColor(ImGuiCol_Text, ok ? ImVec4(0.4f, 0.85f, 0.4f, 1.0f)
-                                            : ImVec4(0.9f, 0.45f, 0.35f, 1.0f));
-    ImGui::TextUnformatted(ok ? "OK" : "MISSING");
-    ImGui::PopStyleColor();
-    if (!detail.empty()) {
-      Hint(detail.c_str());
+  // --- Readiness card ---
+  if (launcher::BeginCard("##status")) {
+    launcher::Overline("SYSTEM CHECK");
+    ImGui::Dummy(ImVec2(0, 16.0f));
+
+    struct Check {
+      const char* label;
+      bool ok;
+      std::string detail;
+    };
+    const Check checks[] = {
+        {"Game executable", have_game,
+         have_game ? detected_game_exe_
+                   : std::string("Place pokersmash.exe next to the launcher.")},
+        {"Game data", have_data,
+         have_data ? settings_.game_data_root
+                   : std::string("Set the game folder on the Game page.")},
+        {"GPU plugin", have_gpu,
+         have_gpu ? std::string("rexgpu-xenos.dll — D3D12 + Vulkan")
+                  : std::string("rexgpu-xenos.dll is missing next to the launcher.")},
+    };
+
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float chip_w = 132.0f;
+
+    for (size_t i = 0; i < std::size(checks); ++i) {
+      const Check& c = checks[i];
+
+      if (i > 0) {
+        ImGui::Dummy(ImVec2(0, 14.0f));
+        launcher::Hairline();
+        ImGui::Dummy(ImVec2(0, 14.0f));
+      }
+
+      const ImVec2 row = ImGui::GetCursorScreenPos();
+      ImDrawList* dl = ImGui::GetWindowDrawList();
+
+      // Status dot.
+      const ImVec4& dot = c.ok ? palette::kOk : palette::kBad;
+      dl->AddCircleFilled(ImVec2(row.x + 5.0f, row.y + 9.0f), 4.0f, ImGui::GetColorU32(dot));
+
+      // Label and detail path.
+      dl->AddText(f.emphasis, f.emphasis->LegacySize, ImVec2(row.x + 22.0f, row.y),
+                  ImGui::GetColorU32(palette::kText), c.label);
+      dl->AddText(f.caption, f.caption->LegacySize, ImVec2(row.x + 22.0f, row.y + 24.0f),
+                  ImGui::GetColorU32(palette::kTextFaint), c.detail.c_str());
+
+      // Chip on the right.
+      ImGui::SetCursorScreenPos(ImVec2(row.x + avail - chip_w, row.y + 1.0f));
+      launcher::StatusChip(c.ok, c.ok ? "Ready" : "Missing");
+
+      // Advance to the bottom of the row. The trailing Dummy submits an item so
+      // ImGui grows the card's content bounds; without it the last row trips the
+      // "extend window boundaries" assert.
+      ImGui::SetCursorScreenPos(ImVec2(row.x, row.y + 46.0f));
+      ImGui::Dummy(ImVec2(0, 0));
     }
-    ImGui::Dummy(ImVec2(0, 4));
-  };
+  }
+  launcher::EndCard();
 
-  status_line("Game executable", have_game,
-              have_game ? detected_game_exe_ : std::string("Place pokersmash.exe next to the launcher."));
-  status_line("Game data", have_data,
-              have_data ? settings_.game_data_root : std::string("Set the game folder on the GAME page."));
-  status_line("GPU plugin", detected_dll_status_.find("found") != std::string::npos,
-              detected_dll_status_);
+  ImGui::Dummy(ImVec2(0, 20.0f));
 
-  ImGui::Dummy(ImVec2(0, 8));
-  ImGui::TextUnformatted("Current configuration");
-  ImGui::Separator();
-  ImGui::Dummy(ImVec2(0, 6));
-  ImGui::Text("Graphics backend: %s", settings_.gpu_backend.c_str());
-  ImGui::Text("Display mode: %s", settings_.display_mode.c_str());
-  ImGui::Text("Frame limit: %s", settings_.frame_limit.c_str());
+  // --- Current configuration card ---
+  if (launcher::BeginCard("##config")) {
+    launcher::Overline("CURRENT CONFIGURATION");
+    ImGui::Dummy(ImVec2(0, 16.0f));
 
-  ImGui::EndChild();
-  ImGui::PopStyleVar();
-  ImGui::PopStyleColor();
+    const char* backend_label = "Auto";
+    for (const auto& o : kBackendOptions) {
+      if (settings_.gpu_backend == o.value) {
+        backend_label = o.label;
+        break;
+      }
+    }
+    const char* display_label = "Windowed";
+    for (const auto& o : kDisplayOptions) {
+      if (settings_.display_mode == o.value) {
+        display_label = o.label;
+        break;
+      }
+    }
+
+    launcher::KeyValueRow("Graphics backend", backend_label, palette::kAccentHot);
+    ImGui::Dummy(ImVec2(0, 12.0f));
+    launcher::KeyValueRow("Display mode", display_label, palette::kText);
+    ImGui::Dummy(ImVec2(0, 12.0f));
+    launcher::KeyValueRow("Frame limit", settings_.frame_limit.c_str(), palette::kText);
+    ImGui::Dummy(ImVec2(0, 12.0f));
+    launcher::KeyValueRow("VSync", settings_.vsync ? "On" : "Off", palette::kText);
+  }
+  launcher::EndCard();
 }
 
 void LauncherApp::DrawGraphicsPage() {
-  ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-  ImGui::TextUnformatted("GRAPHICS");
-  ImGui::PopStyleColor();
-  Hint("How the game appears on your screen.");
-  ImGui::Dummy(ImVec2(0, 12));
+  PageHeader("Graphics", "How the game appears on your screen.", Icon::kGraphics);
 
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, kPanelBg);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 14));
-  ImGui::BeginChild("##graphics", ImVec2(0, 0), true);
+  if (launcher::BeginCard("##graphics")) {
+    launcher::SettingRow("Graphics backend",
+                         "Direct3D 12 is the better-tested path. Vulkan is there if "
+                         "Direct3D 12 does not work. Auto tries Direct3D 12 first.",
+                         240.0f,
+                         [&] { ComboSetting("backend", nullptr, kBackendOptions,
+                                            std::size(kBackendOptions), settings_.gpu_backend,
+                                            240.0f); });
 
-  ComboSetting("backend", "Graphics backend", kBackendOptions,
-               std::size(kBackendOptions), settings_.gpu_backend);
-  Hint("Direct3D 12 is the better-tested path. Vulkan is available if Direct3D 12 "
-       "does not work. Auto tries Direct3D 12 first.");
-  ImGui::Dummy(ImVec2(0, 10));
+    launcher::SettingRow("Display mode",
+                         "Borderless covers the screen without changing the display mode.",
+                         240.0f,
+                         [&] { ComboSetting("display", nullptr, kDisplayOptions,
+                                            std::size(kDisplayOptions), settings_.display_mode,
+                                            240.0f); });
 
-  ComboSetting("display", "Display mode", kDisplayOptions,
-               std::size(kDisplayOptions), settings_.display_mode);
-  Hint("Borderless covers the screen without changing the display mode.");
-  ImGui::Dummy(ImVec2(0, 10));
+    launcher::SettingRow("Render resolution",
+                         "Auto uses the window size. A fixed resolution renders at that "
+                         "size and scales to fit.",
+                         240.0f,
+                         [&] { ComboSetting("res", nullptr, kResolutionOptions,
+                                            std::size(kResolutionOptions),
+                                            settings_.render_resolution, 240.0f); });
 
-  ComboSetting("res", "Render resolution", kResolutionOptions,
-               std::size(kResolutionOptions), settings_.render_resolution);
-  Hint("Auto uses the window size. A fixed resolution renders at that size and "
-       "scales to fit.");
-  ImGui::Dummy(ImVec2(0, 10));
-
-  ImGui::Checkbox("VSync", &settings_.vsync);
-  Hint("Off allows tearing for the lowest latency.");
-
-  ImGui::EndChild();
-  ImGui::PopStyleVar();
-  ImGui::PopStyleColor();
+    launcher::SettingRow("Vertical sync",
+                         "Off allows tearing in exchange for the lowest latency.",
+                         46.0f,
+                         [&] { launcher::Toggle("vsync", &settings_.vsync); });
+  }
+  launcher::EndCard();
 }
 
 void LauncherApp::DrawPerformancePage() {
-  ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-  ImGui::TextUnformatted("PERFORMANCE");
-  ImGui::PopStyleColor();
-  Hint("Frame pacing and diagnostics.");
-  ImGui::Dummy(ImVec2(0, 12));
+  PageHeader("Performance", "Frame pacing and diagnostics.", Icon::kPerformance);
 
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, kPanelBg);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 14));
-  ImGui::BeginChild("##perf", ImVec2(0, 0), true);
+  if (launcher::BeginCard("##perf")) {
+    launcher::SettingRow("Frame limit",
+                         "Auto follows the display refresh rate. The original game runs "
+                         "at 60.",
+                         240.0f,
+                         [&] { ComboSetting("framelimit", nullptr, kFrameLimitOptions,
+                                            std::size(kFrameLimitOptions),
+                                            settings_.frame_limit, 240.0f); });
 
-  ComboSetting("framelimit", "Frame limit", kFrameLimitOptions,
-               std::size(kFrameLimitOptions), settings_.frame_limit);
-  Hint("Auto follows the display refresh rate. The original game runs at 60.");
-  ImGui::Dummy(ImVec2(0, 10));
-
-  ImGui::Checkbox("Show performance overlay", &settings_.show_performance_overlay);
-  Hint("Draws frame time and counters over the game (toggle in game with F3).");
-
-  ImGui::EndChild();
-  ImGui::PopStyleVar();
-  ImGui::PopStyleColor();
+    launcher::SettingRow("Performance overlay",
+                         "Draws frame time and counters over the game. Toggle in game "
+                         "with F3.",
+                         46.0f,
+                         [&] {
+                           launcher::Toggle("overlay", &settings_.show_performance_overlay);
+                         });
+  }
+  launcher::EndCard();
 }
 
 void LauncherApp::DrawGamePage() {
-  ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-  ImGui::TextUnformatted("GAME");
-  ImGui::PopStyleColor();
-  Hint("Your game dump and language.");
-  ImGui::Dummy(ImVec2(0, 12));
+  PageHeader("Game", "Your game dump and language.", Icon::kGame);
 
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, kPanelBg);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 14));
-  ImGui::BeginChild("##game", ImVec2(0, 0), true);
+  if (launcher::BeginCard("##game")) {
+    const launcher::Fonts& f = launcher::GetFonts();
 
-  ImGui::TextUnformatted("Game folder");
-  Hint("The folder containing default.xex and the Data/ directory.");
+    // --- Game folder ---
+    ImGui::PushFont(f.emphasis);
+    ImGui::PushStyleColor(ImGuiCol_Text, palette::kText);
+    ImGui::TextUnformatted("Game folder");
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
+    launcher::Hint("The folder containing default.xex and the Data/ directory.");
+    ImGui::Dummy(ImVec2(0, 12.0f));
 
-  std::array<char, 1024> path_buf{};
-  std::snprintf(path_buf.data(), path_buf.size(), "%s", settings_.game_data_root.c_str());
-  ImGui::SetNextItemWidth(-200);
-  if (ImGui::InputText("##gameroot", path_buf.data(), path_buf.size())) {
-    settings_.game_data_root = path_buf.data();
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Browse...", ImVec2(90, 0))) {
-    // Native folder picker; keeps the launcher dependency-free.
-#if REX_PLATFORM_WIN32
-    BROWSEINFOW bi{};
-    bi.lpszTitle = L"Select the folder containing default.xex";
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
-    if (pidl) {
-      wchar_t wide[MAX_PATH]{};
-      if (SHGetPathFromIDListW(pidl, wide)) {
-        char utf8[MAX_PATH * 3]{};
-        WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, sizeof(utf8), nullptr, nullptr);
-        settings_.game_data_root = utf8;
-      }
-      CoTaskMemFree(pidl);
+    std::array<char, 1024> path_buf{};
+    std::snprintf(path_buf.data(), path_buf.size(), "%s", settings_.game_data_root.c_str());
+    ImGui::PushFont(f.body, f.body->LegacySize);
+    ImGui::SetNextItemWidth(-250.0f);
+    if (ImGui::InputText("##gameroot", path_buf.data(), path_buf.size())) {
+      settings_.game_data_root = path_buf.data();
     }
-#endif
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Open", ImVec2(70, 0))) {
-    if (!settings_.game_data_root.empty()) {
+    ImGui::PopFont();
+    ImGui::SameLine();
+    if (launcher::GhostButton("Browse", ImVec2(112, metrics::kButtonHeight))) {
+      // Native folder picker; keeps the launcher dependency-free.
 #if REX_PLATFORM_WIN32
-      ShellExecuteW(nullptr, L"open", std::filesystem::path(settings_.game_data_root).wstring().c_str(),
-                    nullptr, nullptr, SW_SHOWNORMAL);
+      BROWSEINFOW bi{};
+      bi.lpszTitle = L"Select the folder containing default.xex";
+      bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+      LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+      if (pidl) {
+        wchar_t wide[MAX_PATH]{};
+        if (SHGetPathFromIDListW(pidl, wide)) {
+          char utf8[MAX_PATH * 3]{};
+          WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, sizeof(utf8), nullptr, nullptr);
+          settings_.game_data_root = utf8;
+        }
+        CoTaskMemFree(pidl);
+      }
 #endif
     }
-  }
-
-  // Detected candidates, offered as one-click fills.
-  if (!detected_roots_.empty()) {
-    ImGui::Dummy(ImVec2(0, 6));
-    Hint("Detected next to the launcher:");
-    for (const auto& root : detected_roots_) {
-      const std::string label = root.string();
-      if (ImGui::Selectable(label.c_str(), settings_.game_data_root == label)) {
-        settings_.game_data_root = label;
+    ImGui::SameLine();
+    if (launcher::GhostButton("Open", ImVec2(112, metrics::kButtonHeight))) {
+      if (!settings_.game_data_root.empty()) {
+#if REX_PLATFORM_WIN32
+        ShellExecuteW(nullptr, L"open",
+                      std::filesystem::path(settings_.game_data_root).wstring().c_str(),
+                      nullptr, nullptr, SW_SHOWNORMAL);
+#endif
       }
     }
+
+    // Detected candidates, offered as one-click fills.
+    if (!detected_roots_.empty()) {
+      ImGui::Dummy(ImVec2(0, 18.0f));
+      launcher::Overline("DETECTED NEXT TO THE LAUNCHER");
+      ImGui::Dummy(ImVec2(0, 10.0f));
+      for (const auto& root : detected_roots_) {
+        const std::string label = root.string();
+        const bool selected = settings_.game_data_root == label;
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float row_h = 34.0f;
+        const float row_w = ImGui::GetContentRegionAvail().x;
+
+        ImGui::InvisibleButton(label.c_str(), ImVec2(row_w, row_h));
+        if (ImGui::IsItemHovered()) {
+          dl->AddRectFilled(p, ImVec2(p.x + row_w, p.y + row_h),
+                            ImGui::GetColorU32(palette::kField), metrics::kRadiusSmall);
+        }
+        if (selected) {
+          dl->AddRectFilled(p, ImVec2(p.x + 3.0f, p.y + row_h),
+                            ImGui::GetColorU32(palette::kAccent), 0.0f);
+        }
+        dl->AddText(f.caption, f.caption->LegacySize, ImVec2(p.x + 14.0f, p.y + (row_h - f.caption->LegacySize) * 0.5f),
+                    ImGui::GetColorU32(selected ? palette::kText : palette::kTextMuted),
+                    label.c_str());
+        if (ImGui::IsItemClicked()) {
+          settings_.game_data_root = label;
+        }
+        ImGui::Dummy(ImVec2(0, 2.0f));
+      }
+    }
+
+    ImGui::Dummy(ImVec2(0, 18.0f));
+    launcher::SettingRow("Game language", "Applies to in-game text and menus.", 240.0f,
+                         [&] { ComboSetting("lang", nullptr, kLanguageOptions,
+                                            std::size(kLanguageOptions), settings_.language,
+                                            240.0f); });
   }
-
-  ImGui::Dummy(ImVec2(0, 14));
-  ComboSetting("lang", "Game language", kLanguageOptions,
-               std::size(kLanguageOptions), settings_.language);
-
-  ImGui::EndChild();
-  ImGui::PopStyleVar();
-  ImGui::PopStyleColor();
+  launcher::EndCard();
 }
 
 void LauncherApp::DrawAdvancedPage() {
-  ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-  ImGui::TextUnformatted("ADVANCED");
-  ImGui::PopStyleColor();
-  Hint("Options for troubleshooting.");
-  ImGui::Dummy(ImVec2(0, 12));
+  PageHeader("Advanced", "Options for troubleshooting.", Icon::kAdvanced);
 
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, kPanelBg);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 14));
-  ImGui::BeginChild("##advanced", ImVec2(0, 0), true);
+  if (launcher::BeginCard("##advanced")) {
+    const launcher::Fonts& f = launcher::GetFonts();
 
-  ImGui::Checkbox("Write a log file", &settings_.log_to_file);
-  Hint("Writes pokersmash.log next to the game. Useful when reporting a problem.");
-  ImGui::Dummy(ImVec2(0, 10));
+    launcher::SettingRow("Write a log file",
+                         "Writes pokersmash.log next to the game. Useful when reporting "
+                         "a problem.",
+                         46.0f,
+                         [&] { launcher::Toggle("logfile", &settings_.log_to_file); });
 
-  ImGui::TextUnformatted("Extra command line");
-  Hint("Appended verbatim. Leave empty unless you know what you need.");
-  std::array<char, 512> args_buf{};
-  std::snprintf(args_buf.data(), args_buf.size(), "%s", settings_.extra_args.c_str());
-  ImGui::SetNextItemWidth(-1);
-  if (ImGui::InputText("##extra", args_buf.data(), args_buf.size())) {
-    settings_.extra_args = args_buf.data();
+    // --- Extra command line ---
+    ImGui::Dummy(ImVec2(0, 14.0f));
+    launcher::Hairline();
+    ImGui::Dummy(ImVec2(0, 14.0f));
+
+    ImGui::PushFont(f.emphasis);
+    ImGui::PushStyleColor(ImGuiCol_Text, palette::kText);
+    ImGui::TextUnformatted("Extra command line");
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
+    launcher::Hint("Appended verbatim. Leave empty unless you know what you need.");
+    ImGui::Dummy(ImVec2(0, 10.0f));
+
+    std::array<char, 512> args_buf{};
+    std::snprintf(args_buf.data(), args_buf.size(), "%s", settings_.extra_args.c_str());
+    ImGui::PushFont(f.body, f.body->LegacySize);
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputText("##extra", args_buf.data(), args_buf.size())) {
+      settings_.extra_args = args_buf.data();
+    }
+    ImGui::PopFont();
+
+    // --- Command preview ---
+    ImGui::Dummy(ImVec2(0, 20.0f));
+    launcher::Overline("COMMAND PREVIEW");
+    ImGui::Dummy(ImVec2(0, 10.0f));
+
+    std::string preview = kGameExeName;
+    for (const auto& arg : BuildGameArguments()) {
+      preview += " " + arg;
+    }
+
+    const ImVec2 box = ImGui::GetCursorScreenPos();
+    const float box_w = ImGui::GetContentRegionAvail().x;
+    const ImVec2 text_size = f.caption->CalcTextSizeA(f.caption->LegacySize, box_w - 28.0f, 0.0f,
+                                                    preview.c_str());
+    const float box_h = text_size.y + 22.0f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(box, ImVec2(box.x + box_w, box.y + box_h), ImGui::GetColorU32(palette::kField),
+                      metrics::kRadiusSmall);
+    dl->AddRect(box, ImVec2(box.x + box_w, box.y + box_h), ImGui::GetColorU32(palette::kBorderSoft),
+                metrics::kRadiusSmall, 0, 1.0f);
+    dl->AddText(f.caption, f.caption->LegacySize, ImVec2(box.x + 14.0f, box.y + 11.0f),
+                ImGui::GetColorU32(palette::kTextMuted), preview.c_str());
+    ImGui::Dummy(ImVec2(box_w, box_h));
   }
-
-  ImGui::Dummy(ImVec2(0, 16));
-  ImGui::TextUnformatted("Command preview");
-  ImGui::Separator();
-  ImGui::Dummy(ImVec2(0, 6));
-  std::string preview = kGameExeName;
-  for (const auto& arg : BuildGameArguments()) {
-    preview += " " + arg;
-  }
-  ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
-  ImGui::TextWrapped("%s", preview.c_str());
-  ImGui::PopStyleColor();
-
-  ImGui::EndChild();
-  ImGui::PopStyleVar();
-  ImGui::PopStyleColor();
+  launcher::EndCard();
 }
 
 void LauncherApp::DrawBottomBarContents() {
-  // Left: status / error text, vertically centred against the buttons.
-  ImGui::SetCursorPos(ImVec2(24, 26));
+  const launcher::Fonts& f = launcher::GetFonts();
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+
+  // --- Left: status line ---
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  const float bar_h = ImGui::GetContentRegionAvail().y;
+  const float text_y = origin.y + (bar_h - f.body->LegacySize) * 0.5f;
+
   if (!launch_error_.empty()) {
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.4f, 0.35f, 1.0f));
-    ImGui::TextWrapped("%s", launch_error_.c_str());
-    ImGui::PopStyleColor();
+    dl->AddCircleFilled(ImVec2(origin.x + 32.0f + 4.0f, text_y + f.body->LegacySize * 0.5f), 4.0f,
+                        ImGui::GetColorU32(palette::kBad));
+    dl->AddText(f.body, f.body->LegacySize, ImVec2(origin.x + 50.0f, text_y),
+                ImGui::GetColorU32(palette::kBad), launch_error_.c_str());
   } else {
-    ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
-    ImGui::TextUnformatted("Ready.");
-    ImGui::PopStyleColor();
+    dl->AddCircleFilled(ImVec2(origin.x + 32.0f + 4.0f, text_y + f.body->LegacySize * 0.5f), 4.0f,
+                        ImGui::GetColorU32(palette::kOk));
+    dl->AddText(f.body, f.body->LegacySize, ImVec2(origin.x + 50.0f, text_y),
+                ImGui::GetColorU32(palette::kTextMuted), "Ready to play.");
   }
 
-  // Right: Save + PLAY, pinned to the bottom-right corner.
-  const float play_w = 200.0f;
-  const float save_w = 120.0f;
-  const float margin = 24.0f;
-  const float spacing = 12.0f;
+  // --- Right: Save + PLAY ---
+  const float play_w = 208.0f;
+  const float save_w = 118.0f;
+  const float gap = 12.0f;
+  const float margin = 32.0f;
+  const float bar_w = ImGui::GetContentRegionAvail().x;
+  const float buttons_y = origin.y + (bar_h - metrics::kButtonHeight) * 0.5f;
 
-  const float window_w = ImGui::GetWindowWidth();
-  const float buttons_y = 14.0f;
-
-  ImGui::SetCursorPos(ImVec2(window_w - margin - play_w - spacing - save_w, buttons_y));
-  if (ImGui::Button("Save", ImVec2(save_w, 40))) {
+  ImGui::SetCursorScreenPos(ImVec2(origin.x + bar_w - margin - play_w - gap - save_w, buttons_y));
+  if (launcher::GhostButton("Save", ImVec2(save_w, metrics::kButtonHeight))) {
     SaveSettings();
   }
 
-  ImGui::SetCursorPos(ImVec2(window_w - margin - play_w, buttons_y));
-  ImGui::PushStyleColor(ImGuiCol_Button, kAccent);
-  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAccentHover);
-  ImGui::PushStyleColor(ImGuiCol_ButtonActive, kAccent);
-  if (ImGui::Button("PLAY", ImVec2(play_w, 40))) {
+  ImGui::SetCursorScreenPos(ImVec2(origin.x + bar_w - margin - play_w, buttons_y));
+  if (launcher::PrimaryButton("PLAY", ImVec2(play_w, metrics::kButtonHeight))) {
     SaveSettings();
     LaunchGame();
   }
-  ImGui::PopStyleColor(3);
 }
 
 // ===========================================================================
@@ -724,7 +983,18 @@ void LauncherApp::LoadSettings() {
     return;
   }
   std::string line;
+  bool first_line = true;
   while (std::getline(in, line)) {
+    // Editors on Windows happily write a UTF-8 BOM, which would otherwise end up
+    // glued to the first key and silently break parsing.
+    if (first_line) {
+      first_line = false;
+      if (line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF &&
+          static_cast<unsigned char>(line[1]) == 0xBB &&
+          static_cast<unsigned char>(line[2]) == 0xBF) {
+        line.erase(0, 3);
+      }
+    }
     auto hash = line.find('#');
     if (hash != std::string::npos) {
       line.erase(hash);
@@ -797,27 +1067,45 @@ bool LauncherApp::LooksLikeGameRoot(const std::filesystem::path& dir) {
 }
 
 std::vector<std::filesystem::path> LauncherApp::DiscoverGameRoots() const {
-  const auto dir = LauncherDir();
-  const std::filesystem::path candidates[] = {
-      dir / "extracted",
-      dir / "game_data",
-      dir / "game",
-      dir,
-      dir / ".." / "extracted",
-      dir / ".." / ".." / "extracted",
-      dir / ".." / ".." / ".." / "extracted",
-  };
-
   std::vector<std::filesystem::path> found;
-  for (const auto& candidate : candidates) {
-    std::error_code ec;
-    auto normalized = std::filesystem::weakly_canonical(candidate, ec);
-    if (ec || !LooksLikeGameRoot(normalized)) {
-      continue;
+
+  // Walk up from the launcher's own directory, checking each ancestor for a
+  // folder that looks like an extracted game dump. A fixed list of relative
+  // paths would miss the build tree (out/build/<preset>/ is four levels below
+  // the repo root) and any layout a user happens to pick.
+  const std::filesystem::path subdirs[] = {"extracted", "game_data", "game"};
+
+  std::error_code ec;
+  auto current = std::filesystem::weakly_canonical(LauncherDir(), ec);
+  if (ec) {
+    return found;
+  }
+
+  // Six levels is enough to get from any plausible build output directory up to
+  // the drive root, and keeps the search from wandering the whole filesystem.
+  for (int depth = 0; depth < 6 && !current.empty(); ++depth) {
+    for (const auto& sub : subdirs) {
+      auto candidate = std::filesystem::weakly_canonical(current / sub, ec);
+      if (ec) {
+        continue;
+      }
+      if (LooksLikeGameRoot(candidate) &&
+          std::find(found.begin(), found.end(), candidate) == found.end()) {
+        found.push_back(candidate);
+      }
     }
-    if (std::find(found.begin(), found.end(), normalized) == found.end()) {
-      found.push_back(normalized);
+
+    // The directory itself may already be the game root (the dist/ layout).
+    if (LooksLikeGameRoot(current) &&
+        std::find(found.begin(), found.end(), current) == found.end()) {
+      found.push_back(current);
     }
+
+    auto parent = current.parent_path();
+    if (parent == current) {
+      break;
+    }
+    current = parent;
   }
   return found;
 }
@@ -870,7 +1158,7 @@ bool LauncherApp::LaunchGame() {
   }
   if (settings_.game_data_root.empty() || !LooksLikeGameRoot(settings_.game_data_root)) {
     launch_error_ = "Game folder is not set or does not contain default.xex. "
-                    "Set it on the GAME page.";
+                    "Set it on the Game page.";
     return false;
   }
 
