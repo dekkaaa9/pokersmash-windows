@@ -1,0 +1,36 @@
+# --- Game data (copyrighted, never commit) ---
+extracted/
+game_data/
+game/
+*.xex
+*.xex.lastloadinfo
+file_bundle.bin
+loading_bundle.bin
+Data/
+5841089C/
+
+# --- Build output ---
+pokersmash/out/
+pokersmash/generated/*
+!pokersmash/generated/rexglue.cmake
+work/
+
+# --- Prebuilt binaries (build them yourself, see README) ---
+dist/
+
+# --- Runtime artifacts ---
+logs/
+*.log
+*.toml.bak
+launcher.toml
+pokersmash.log
+
+# --- Distribution scratch ---
+dist/logs/
+dist/run_*.txt
+# --- OS / editor ---
+Thumbs.db
+desktop.db
+.vs/
+.vscode/
+.idea/
