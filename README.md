@@ -122,7 +122,21 @@ The manifest expects the game root at `../extracted` relative to
 
 ### 2. Build and install the ReXGlue SDK
 
+Clone the SDK **next to this repository**, into `work/rexglue-sdk`:
+
+```
+repo/
+  pokersmash/          <- this project
+  work/
+    rexglue-sdk/       <- SDK source + build + install
+```
+
+The project's `CMakeLists.txt` looks for the SDK there automatically. If you put
+it somewhere else, pass `-DCMAKE_PREFIX_PATH=<sdk install prefix>` when
+configuring.
+
 ```powershell
+mkdir work; cd work
 git clone --recursive https://github.com/rexglue/rexglue-sdk
 cd rexglue-sdk
 
@@ -143,7 +157,7 @@ cmake --install out/build/win-amd64 --config Release
   (`C:\Windows\System32\vulkan-1.dll`); the vendored MoltenVK is only built on
   macOS.
 
-### 3. Generate and build the project
+### 3. Generate the code, then configure and build
 
 ```powershell
 cd path\to\repo\pokersmash
@@ -153,13 +167,14 @@ cmake --preset win-amd64-release
 cmake --build out/build/win-amd64-release
 ```
 
-Codegen runs automatically as the first build step (it reads
-`../extracted/default.xex` through the manifest), so the explicit
-`rexglue codegen` line above is optional. To run codegen on its own:
+Codegen must run **before** the first configure. `generated/rexglue.cmake` reads
+`generated/default/sources.cmake` at configure time to build the list of
+recompiled sources; if that file does not exist yet, the recompiled objects are
+left out of the link and you get `undefined symbol: rex::PPCImageConfig`.
 
-```powershell
-cmake --build out/build/win-amd64-release --target pokersmash_codegen
-```
+On later builds codegen re-runs automatically as a build step, but only when an
+input changes — so you never need to run it by hand again unless you edit the
+manifest or swap in a different `default.xex`.
 
 This produces, in `out/build/win-amd64-release/`:
 
